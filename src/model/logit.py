@@ -15,6 +15,7 @@ class Logit(ABC):
         # Ndarray
         self.U = U
         self.P = P
+        self.Z = np.exp(self.U)
 
         # Shapes
         if U.ndim == 3:
@@ -26,8 +27,8 @@ class Logit(ABC):
     def solve_q(self, cvg_criterion: float, max_iter: int):
         q = 0.5 * np.ones((self.I, self.J))
         for _ in range(max_iter):
-            denominator = 1 / np.einsum("ij,ijn->in", q, np.exp(self.U))
-            numerator = np.einsum("ijn,gjn->ijn", np.exp(self.U), self.P)
+            denominator = 1 / np.einsum("ij,ijn->in", q, self.Z)
+            numerator = np.einsum("ijn,gjn->ijn", self.Z, self.P)
             factor = np.einsum("ijn,in->ij", numerator, denominator)
             q_new = factor * q
             if np.max(np.abs(q_new - q)) < cvg_criterion:
@@ -35,3 +36,9 @@ class Logit(ABC):
             else:
                 q = q_new
         return q
+
+    def verify_q(self, q):
+        numerator = np.einsum("ijn,ij,ijn->ijn", self.Z, q, self.P)
+        denominator = 1 / np.einsum("ij,ijn->in", q, self.Z)
+        q_hat = np.einsum("ijn,in->ij", numerator, denominator)
+        return q, q_hat
