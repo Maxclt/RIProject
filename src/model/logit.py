@@ -10,7 +10,7 @@ class Logit(ABC):
 
         Args:
             U (np.ndarray): Payoffs Matrix of shape I x J x N (#{Individuals} x #{Feasible Products} x #{States of the world})
-            P (np.ndarray): Priors Tensors of shape G x N x J (#{Feasible Products} x #{States of the world} x #{Different Beliefs Groups})
+            P (np.ndarray): Priors Tensors of shape G x J x N (#{Different Beliefs Groups} x #{Feasible Products} x #{States of the world})
         """
         # Ndarray
         self.U = U
@@ -23,5 +23,15 @@ class Logit(ABC):
             self.N, self.J = U.shape
         self.G = P.shape[1] if P.ndim == 3 else 1
 
-    def get_q(self):
-        return np.einsum("njg,")
+    def solve_q(self, cvg_criterion: float, max_iter: int):
+        q = 0.5 * np.ones((self.I, self.J))
+        for _ in range(max_iter):
+            denominator = 1 / np.einsum("ij,ijn->in", q, np.exp(self.U))
+            numerator = np.einsum("ijn,gjn->ijn", np.exp(self.U), self.P)
+            factor = np.einsum("ijn,in->ij", numerator, denominator)
+            q_new = factor * q
+            if np.max(np.abs(q_new - q)) < cvg_criterion:
+                break
+            else:
+                q = q_new
+        return q
