@@ -105,6 +105,8 @@ class RILogit:
 
     def solve_BA(self):
 
+        exitflag = -1
+
         marg = self.initial_p
 
         with tqdm(total=self.maxit, desc="Blahut–Arimoto Solver", unit="iter") as pbar:
@@ -125,13 +127,14 @@ class RILogit:
                 pbar.update(1)
 
                 if step_size < self.stop_tol:
+                    exitflag = 1
                     break
 
         # Normalize output marginal probabilities
         p_marg = np.maximum(marg, 0)
         p_marg /= p_marg.sum()
 
-        return p_marg
+        return p_marg, exitflag
 
     def solve_SQP(self):
 
@@ -236,4 +239,4 @@ class RILogit:
         p_marg = np.clip(p_marg, 0, None)
         p_marg /= np.sum(p_marg)
 
-        return p_marg, exitflag
+        return p_marg.reshape(-1, 1), exitflag
