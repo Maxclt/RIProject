@@ -1,59 +1,73 @@
 import numpy as np
 import cvxpy as cp
 
-from abc import ABC
 from typing import Callable, Union
 from tqdm import tqdm
-from scipy.optimize import root_scalar
+from scipy.optimize import root_scalar, linprog
 
 
-class Logit(ABC):
+class RILogit:
 
     def __init__(
         self,
-        U: np.ndarray,
+        u_mat: np.ndarray,
         ppi: np.ndarray,
         llambda: float,
         method: str = "BA",
         stop_fun: Union[str, float] = "DIE",
-        init_guess: np.ndarray = None,
+        **kwargs,
     ):
         """Initiate the matrix that defines individuals' payoffs and priors
 
         Args:
-            U (np.ndarray): Payoffs Matrix of shape J x N (#{Feasible Products} x #{States of the world})
+            u_mat (np.ndarray): Payoffs Matrix of shape N x J ( #{States of the world} x #{Feasible Products})
             ppi (np.ndarray): Prior Vector of length N (#{States of the world})
             llambda (float): Info Cost
             method (str, optional): String to choose between the Blahut–Arimoto or the SQP Solver. Defaults to "BA".
             stop_fun (Union[str, float], optional): String to choose between the DIE or a norm p (float) as a stopping function. Defaults to "DIE".
-            init_guess (np.ndarray, optional): Initial Guess of Unconditionnal Posterior as a Vector of length J. Defaults to None.
-
-        Returns:
-            _type_: _description_
         """
-        # Ndarray
-        self.U = U
-        self.ppi = ppi  # define differently from Armenter et al. Since, we assume that products can be in different states of the world.
-        self.b_logscales = -np.max(self.U, axis=0) if method == "SQP" else 0
-        self.B = np.exp((self.U / llambda) + self.b_logscales)
+        # Args
+        self.u_mat = u_mat
+        self.ppi = np.asarray(ppi).reshape(-1, 1) if method == "BA" else ppi
+        self.llambda = llambda
 
         # Shapes
-        self.J, self.N = U.shape
+        self.N, self.J = u_mat.shape
+
+        # Optional Args
+        self.actionlabels = kwargs.get("actionlabels", np.arange(1, self.N + 1))
+        self.maxit = kwargs.get("MaxIterations", 10000)
+        self.maxlinit = kwargs.get("MaxLinIt", 10000)
+        self.maxquadit = kwargs.get("MaxQuadIt", 200)
+        self.initial_p = kwargs.get("initial_p", None)
+        self.stop_tol = kwargs.get("stop_tol", 1e-12)
+        self.zero_tol = kwargs.get("zero_tol", 1e-9)
+
+        # Attention Matrix
+        self.b_logscales = -np.max(self.u_mat, axis=1)
+        self.b_mat = (
+            np.exp((self.u_mat / llambda) + self.b_logscales[:, None])
+            if method == "SQP"
+            else np.exp(self.u_mat / llambda)
+        )
 
         # Dist
         self.IE: Callable[[np.ndarray], np.ndarray] = lambda p: llambda * (
-            np.log(self.B.T @ p) - self.b_logscales
+            np.log(self.b_mat @ p) - self.b_logscales
+            if method == "SQP"
+            else np.log(self.b_mat @ p)
         )
+
         self.DIE: Callable[[np.ndarray, np.ndarray], float] = (
-            lambda p, q: (self.IE(p) - self.IE(q)).T
-            @ np.diag(self.P)
+            lambda p, q: (self.IE(p) - self.IE(q))
+            @ np.diag(self.ppi)
             @ (self.IE(p) - self.IE(q))
         )
 
         # Objective for SQP
 
         self.neg_w: Callable[[np.ndarray], float] = (
-            lambda p: -llambda * ppi @ np.log(self.B.T @ p)
+            lambda p: -llambda * ppi.T @ np.log(self.b_mat @ p)
         )
 
         # Stoppping function
@@ -67,18 +81,17 @@ class Logit(ABC):
             )
 
         else:
-            return KeyError
+            self.stop_fun: Callable[[np.ndarray, np.ndarray], float] = (
+                lambda p, q: np.abs(self.neg_w(p) - self.neg_w(q))
+            )
 
         # Initial Guess
 
-        if init_guess is None:
-            FI_pjoint = (
-                np.arange(self.J)[:, None] == np.argmax(self.U, axis=0)
-            ).astype(int)
-            self.init_guess = FI_pjoint @ self.ppi
-
-        else:
-            self.init_guess = init_guess
+        if self.initial_p is None:
+            FI_actions = np.argmax(self.u_mat, axis=1)
+            FI_pjoint = np.zeros(self.u_mat.shape)
+            FI_pjoint[np.arange(self.N), FI_actions] = 1
+            self.initial_p = FI_pjoint.T @ self.ppi
 
     def slide(self, b_old: np.ndarray, b_new: np.ndarray) -> np.ndarray:
         if (self.ppi / b_new).T @ (b_old - b_new) <= 0:
@@ -90,118 +103,137 @@ class Logit(ABC):
             t = root_scalar(f, bracket=[0, 1], method="brentq").root
             return t * b_new + (1 - t) * b_old, t
 
-    def solve_BA(self, init_guess: np.ndarray, cvg_criterion: float, max_iter: int):
-        q = init_guess
+    def solve_BA(self):
 
-        with tqdm(total=max_iter, desc="Blahut–Arimoto Solver", unit="iter") as pbar:
-            for _ in range(max_iter):
-                denominator = 1 / np.einsum("j,jn->n", q, self.B)
-                numerator = np.einsum("jn,n->jn", self.B, self.ppi)
-                factor = np.einsum("jn,n->j", numerator, denominator)
-                q_new = factor * q
-                error = self.stop_fun(q_new, q)
+        marg = self.initial_p
 
-                if error < cvg_criterion:
-                    break
-                else:
-                    q = q_new
+        with tqdm(total=self.maxit, desc="Blahut–Arimoto Solver", unit="iter") as pbar:
+            for _ in range(self.maxit):
 
-                pbar.set_postfix({"Error": error})
+                # Store previous marginal
+                marg_old = marg.copy()
+
+                # Apply Blahut-Arimoto update
+                temp_mat = marg.T * self.b_mat
+                pcond_mat = temp_mat / temp_mat.sum(axis=1, keepdims=True)
+                marg = pcond_mat.T @ self.ppi
+
+                # Compute step size
+                step_size = self.stop_fun(marg, marg_old)
+
+                pbar.set_postfix({"Error": step_size})
                 pbar.update(1)
 
-        q = np.maximum(0, q)
-        q /= q.sum()
+                if step_size < self.stop_tol:
+                    break
 
-        return q
+        # Normalize output marginal probabilities
+        p_marg = np.maximum(marg, 0)
+        p_marg /= p_marg.sum()
 
-    def solve_SQP(
-        self,
-        zerotol: float,
-        init_guess: np.ndarray = None,
-        cvg_criterion: float = 1e-10,
-        max_iter: int = 1000,
-    ):
+        return p_marg
 
-        b = self.B @ init_guess
+    def solve_SQP(self):
 
-        with tqdm(total=max_iter, desc="SQP Solver", unit="iter") as pbar:
+        marg = self.initial_p
+        b = self.b_mat @ marg
 
-            for _ in range(max_iter):
-                scores = np.sum(self.ppi * (self.B / b), axis=1) - 1
+        exitflag = -1
+
+        with tqdm(total=self.maxit, desc="SQP Solver", unit="iter") as pbar:
+
+            for _ in range(self.maxit):
+
+                # Copy previous iterations
+                b_old = b.copy()
+                marg_old = marg.copy()
+
+                # Remove unlikely actions
+                scores = (
+                    np.sum(self.ppi[:, None] * (self.b_mat / b[:, None]), axis=0) - 1
+                )
                 zmax = np.max(scores)
-                cand = scores >= min(-zmax * (1 - zerotol) / zerotol, -zerotol)
+                cand = scores >= min(
+                    -(1 - self.zero_tol) / self.zero_tol * zmax, -self.zero_tol
+                )
                 j = np.sum(cand)
-
-                D = np.diag(self.ppi / b**2)
-                H = self.B[cand, :] @ D @ self.B[cand, :].T
-
-                q_old, q_trimmed = q.copy(), q.copy()[cand]
-
                 # Optimization variable
                 Dmarg = cp.Variable(j)
 
-                # Define the quadratic matrix H and ensure PSD
-                H_psd = cp.psd_wrap(H)
-
-                # Define the linear term
+                # Compute quadratic and linear parameters of the objective
+                D = np.diag(self.ppi / (b * b))
+                H = self.b_mat[:, cand].T @ D @ self.b_mat[:, cand]
+                marg_trimmed = marg[cand]
+                H_psd = cp.psd_wrap(H)  # Ensure PSD
                 f = (
-                    -2 * (self.ppi / b).T @ self.B[cand, :].T + q_trimmed @ H_psd
-                ).flatten()  # Ensure shape
+                    -2 * (self.ppi / b) @ self.b_mat[:, cand] + marg_trimmed @ H_psd
+                ).flatten(
+                    order="C"
+                )  # Ensure shape
 
-                # Define the optimization variable
-                Dmarg = cp.Variable(j)
+                # Objective
+                objective = cp.Minimize(0.5 * cp.quad_form(Dmarg, H_psd) + f @ Dmarg)
 
                 # Constraints
                 constraints = [
                     cp.sum(Dmarg) == 0,  # Equality constraint (sum to 0)
-                    Dmarg >= (np.zeros(j) - q_trimmed),  # Lower bound
-                    Dmarg <= (np.ones(j) - q_trimmed),  # Upper bound
+                    Dmarg >= (np.zeros(j) - marg_trimmed),  # Lower bound
+                    Dmarg <= (np.ones(j) - marg_trimmed),  # Upper bound
                 ]
 
-                # Objective function
-                objective = cp.Minimize(0.5 * cp.quad_form(Dmarg, H_psd) + q @ Dmarg)
-
-                # Solve the problem
+                # Minimize the objective
                 problem = cp.Problem(objective, constraints)
-                problem.solve(
-                    solver=cp.OSQP
-                )  # Use a robust solver  # Alternative solvers: cp.SCS, cp.ECOS
-
-                # Extract results
+                problem.solve(solver=cp.OSQP)
                 found_quad = problem.status in ["optimal", "optimal_inaccurate"]
                 Dmarg_value = Dmarg.value if found_quad else None
 
-                if Dmarg_value.shape[0] < 1:
-                    q = q_old
+                if not found_quad:
                     exitflag = 0
-
-                q[cand] += Dmarg_value
-                Dw = self.neg_w(q_old) - self.neg_w(q)
-
-                slide_step = True
-                if Dw < 0:
-                    slide_step = False
-
-                if slide_step:
-                    b_old = b.copy()
-                    b_new = self.B.T @ q
-                    b, t = self.slide(b_old, b_new)
-
-                error = self.DIE(q_old, q)
-
-                q = np.maximum(0, q)
-                q /= q.sum()
-
-                pbar.set_postfix({"Error": error})
-                pbar.update(1)
-
-                if error < cvg_criterion:
                     break
 
-        return q
+                # Update marginal
+                marg[cand] += Dmarg_value
 
-    def verify_q(self, q):
-        numerator = np.einsum("jn,j,jn->jn", self.B, q, self.ppi)
-        denominator = 1 / np.einsum("j,jn->n", q, self.B)
-        q_hat = np.einsum("jn,n->j", numerator, denominator)
-        return q, q_hat
+                # Check if the objective is improved
+                Dw = -self.neg_w(marg) + self.neg_w(marg_old)
+                if Dw < 0:
+                    exitflag = 0
+                    break
+
+                b, _ = self.slide(b_old, self.b_mat @ marg)
+
+                stepsize = self.stop_fun(marg, marg_old)
+
+                pbar.set_postfix({"Error": stepsize})
+                pbar.update(1)
+
+                print(stepsize)
+
+                if stepsize < self.stop_tol:
+                    exitflag = 1
+                    break
+
+        # Scaling
+        if self.maxlinit > 0:
+            constr1 = np.hstack([-self.b_mat, b[:, None]])
+            ff = np.hstack([np.zeros(self.J), -1])
+
+            result = linprog(
+                ff,
+                A_ub=constr1,
+                b_ub=np.zeros(self.N),
+                A_eq=np.ones((1, self.J + 1)),
+                b_eq=[1],
+                bounds=[(0, 1)] * self.J + [(0, None)],
+            )
+
+            p_marg = result.x[:-1] if result.success else marg
+
+        else:
+            p_marg = marg
+
+        # Normalize probability
+        p_marg = np.clip(p_marg, 0, None)
+        p_marg /= np.sum(p_marg)
+
+        return p_marg, exitflag
