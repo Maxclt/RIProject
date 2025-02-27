@@ -39,6 +39,7 @@ class RILogit:
         self.maxit = kwargs.get("MaxIterations", 10000)
         self.maxlinit = kwargs.get("MaxLinIt", 10000)
         self.maxquadit = kwargs.get("MaxQuadIt", 200)
+        self.method = method
         self.initial_p = kwargs.get("initial_p", None)
         self.stop_tol = kwargs.get("stop_tol", 1e-12)
         self.zero_tol = kwargs.get("zero_tol", 1e-9)
@@ -240,3 +241,9 @@ class RILogit:
         p_marg /= np.sum(p_marg)
 
         return p_marg.reshape(-1, 1), exitflag
+
+    def get_marg(self):
+        p_marg, exitflag = self.solve_BA() if self.method == "BA" else self.solve_SQP()
+        if exitflag < 1:
+            print("Warning algorithm did not converge")
+        return p_marg
