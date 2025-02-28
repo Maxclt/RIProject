@@ -211,8 +211,6 @@ class RILogit:
                 pbar.set_postfix({"Error": stepsize})
                 pbar.update(1)
 
-                print(stepsize)
-
                 if stepsize < self.stop_tol:
                     exitflag = 1
                     break
@@ -247,3 +245,8 @@ class RILogit:
         if exitflag < 1:
             print("Warning algorithm did not converge")
         return p_marg
+
+    def get_logit(self):
+        p_marg = self.get_marg()
+        temp_mat = p_marg.T * self.b_mat
+        return temp_mat / temp_mat.sum(axis=1, keepdims=True)
