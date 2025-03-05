@@ -1,9 +1,13 @@
 import numpy as np
 import cvxpy as cp
+import itertools
 
 from typing import Callable, Union
 from tqdm import tqdm
 from scipy.optimize import root_scalar, linprog
+
+# TODO code the first function that returns the ppi from a N x J prior matrix or vector of independant probabilities and adapt u_mat to repeat with each states (n, j)
+# TODO see and test the best
 
 
 class RILogit:
@@ -21,18 +25,33 @@ class RILogit:
 
         Args:
             u_mat (np.ndarray): Payoffs Matrix of shape N x J ( #{States of the world} x #{Feasible Products})
-            ppi (np.ndarray): Prior Vector of length N (#{States of the world})
+            ppi (np.ndarray): Prior Vector (Matrix) of length (Shape) N x J (#{States of the world})
             llambda (float): Info Cost
             method (str, optional): String to choose between the Blahut–Arimoto or the SQP Solver. Defaults to "BA".
             stop_fun (Union[str, float], optional): String to choose between the DIE or a norm p (float) as a stopping function. Defaults to "DIE".
         """
-        # Args
-        self.u_mat = u_mat
-        self.ppi = np.asarray(ppi).reshape(-1, 1) if method == "BA" else ppi
-        self.llambda = llambda
-
         # Shapes
-        self.N, self.J = u_mat.shape
+        self.num_states, self.num_products = u_mat.shape
+
+        # Args
+        self.all_states = list(
+            itertools.product(range(self.num_states), repeat=self.num_products)
+        )
+        self.u_mat = np.array(
+            [
+                [u_mat[n_j, j] for j, n_j in enumerate(combo)]
+                for combo in self.all_states
+            ]
+        )
+        self.ppi = np.array(
+            [
+                np.prod([ppi[n, j] for j, n in enumerate(combo)])
+                for combo in self.all_states
+            ]
+        )
+        self.N, self.J = self.u_mat.shape
+        self.ppi = self.ppi.reshape(-1, 1) if method == "BA" else self.ppi
+        self.llambda = llambda
 
         # Optional Args
         self.actionlabels = kwargs.get("actionlabels", np.arange(1, self.N + 1))
@@ -68,7 +87,7 @@ class RILogit:
         # Objective for SQP
 
         self.neg_w: Callable[[np.ndarray], float] = (
-            lambda p: -llambda * ppi.T @ np.log(self.b_mat @ p)
+            lambda p: -llambda * self.ppi.T @ np.log(self.b_mat @ p)
         )
 
         # Stoppping function
