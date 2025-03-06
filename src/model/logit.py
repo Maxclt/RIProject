@@ -269,3 +269,6 @@ class RILogit:
         p_marg = self.get_marg()
         temp_mat = p_marg.T * self.b_mat
         return temp_mat / temp_mat.sum(axis=1, keepdims=True)
+
+    def get_states(self):
+        return self.all_states
