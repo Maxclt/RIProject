@@ -8,25 +8,21 @@ from numpy.random import default_rng
 # Multiple individuals, (corresponds to demographic groups)
 
 
-def get_dist_from_sim(simulation: np.ndarray):
-    counts = np.apply_along_axis(np.bincount, axis=1, arr=simulation)
+def get_dist_from_sim(simulation: np.ndarray, minlength: int):
+    counts = np.apply_along_axis(
+        np.bincount, axis=1, arr=simulation, minlength=minlength
+    )
     return counts / simulation.shape[1]
 
 
 class SimulateRILogit(RILogit):
-    def __init__(
-        self,
-        characteristics: np.ndarray,
-        ppi: np.ndarray,
-        llambda,
-        method="BA",
-        stop_fun="DIE",
-        **kwargs,
-    ):
-        # Shape
-        self.n_i, self.n_var = characteristics.shape
+    def __init__(self, u_mat, ppi, llambda, method="BA", stop_fun="DIE", **kwargs):
+        super().__init__(u_mat, ppi, llambda, method, stop_fun, **kwargs)
 
-    def simulate(self, states: Union[Tuple, List[Tuple]], n_sim) -> np.ndarray:
+        self.marg = self.get_marg()
+        self.logit = self.get_logit()
+
+    def simulate(self, states: Union[Tuple, List[Tuple]], n_sim: int) -> np.ndarray:
         """Simulate n_sim draws of product choices from
         the logit distribution in one or multiple given states
         using the inverse sampling method
@@ -53,7 +49,7 @@ class SimulateRILogit(RILogit):
         u = rg.uniform(size=(n_sim, num_states_len))  # Shape (n_sim, n_states)
 
         # Retrieve logit distributions for selected states
-        dist = self.get_logit()[num_states]  # Shape (n_states, num_products)
+        dist = self.logit[num_states]  # Shape (n_states, num_products)
 
         # Compute CDF for each distribution
         cdf = np.cumsum(dist, axis=1)  # Shape (n_states, num_products)
@@ -63,22 +59,4 @@ class SimulateRILogit(RILogit):
             [np.searchsorted(cdf[i], u[:, i]) for i in range(num_states_len)]
         )
 
-        return sim, get_dist_from_sim(sim)
-
-    def simulate_all(self):
-        """Simulate using multiple u_mat values derived from characteristics."""
-        results = [] * self.n_i
-
-        for i, characteristic in enumerate(self.characteristics):
-            u_mat = self.utilities(characteristic)
-
-            # Reinitialize with new u_mat
-            super().__init__(
-                u_mat, self.ppi, self.llambda, self.method, self.stop_fun, **self.kwargs
-            )
-
-            # Run the simulation for the given characteristic
-            sim_result, _ = self.simulate(self.all_states, n_sim=1)
-            results[i] = sim_result[0]
-
-        return results
+        return sim, get_dist_from_sim(sim, self.J)
